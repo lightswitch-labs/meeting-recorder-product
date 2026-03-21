@@ -4,7 +4,7 @@ import Foundation
 /// First-launch onboarding wizard. Collects:
 /// 1. Where to save recordings (WAV files)
 /// 2. Where to save transcripts/summaries (markdown files)
-/// 3. Access token for the key-vending service (stored in Keychain)
+/// 3. Google sign-in for API access
 final class OnboardingWizard {
 
     enum Result {
@@ -36,37 +36,29 @@ final class OnboardingWizard {
                 return
             }
 
-            // Step 3: Access token
-            let token = promptForToken()
+            // Step 3: Google sign-in
+            promptForGoogleSignIn { signedIn in
+                // Build config (proceed even if sign-in was skipped)
+                let recordingsPath = (recordingsDir as NSString).appendingPathComponent("recordings")
+                let transcriptsPath = (transcriptsDir as NSString).appendingPathComponent("transcripts")
 
-            // Build config
-            let recordingsPath = (recordingsDir as NSString).appendingPathComponent("recordings")
-            let transcriptsPath = (transcriptsDir as NSString).appendingPathComponent("transcripts")
+                // Create directories
+                try? FileManager.default.createDirectory(atPath: recordingsPath, withIntermediateDirectories: true)
+                try? FileManager.default.createDirectory(atPath: transcriptsPath, withIntermediateDirectories: true)
 
-            // Create directories
-            try? FileManager.default.createDirectory(atPath: recordingsPath, withIntermediateDirectories: true)
-            try? FileManager.default.createDirectory(atPath: transcriptsPath, withIntermediateDirectories: true)
+                let config = AppConfig(
+                    recordingsDir: recordingsPath,
+                    transcriptsDir: transcriptsPath,
+                    entities: [],
+                    onboardingComplete: true
+                )
+                config.save()
 
-            // Save token to Keychain
-            if let token = token, !token.isEmpty {
-                let saved = KeychainHelper.save(key: KeychainHelper.accessToken, value: token)
-                if saved {
-                    fputs("[onboarding] Access token saved to Keychain\n", stderr)
-                } else {
-                    fputs("[onboarding] WARNING: Failed to save access token to Keychain\n", stderr)
+                fputs("[onboarding] Setup complete — recordings: \(recordingsPath), transcripts: \(transcriptsPath), signed in: \(signedIn)\n", stderr)
+                DispatchQueue.main.async {
+                    completion(.completed(config))
                 }
             }
-
-            let config = AppConfig(
-                recordingsDir: recordingsPath,
-                transcriptsDir: transcriptsPath,
-                entities: [],
-                onboardingComplete: true
-            )
-            config.save()
-
-            fputs("[onboarding] Setup complete — recordings: \(recordingsPath), transcripts: \(transcriptsPath)\n", stderr)
-            completion(.completed(config))
         }
     }
 
@@ -95,33 +87,49 @@ final class OnboardingWizard {
             if panel.runModal() == .OK, let url = panel.url {
                 return url.path
             }
-            // User cancelled the folder picker — fall back to default
             return defaultPath
         } else {
             return nil
         }
     }
 
-    private static func promptForToken() -> String? {
+    private static func promptForGoogleSignIn(completion: @escaping (Bool) -> Void) {
         let alert = NSAlert()
-        alert.messageText = "Access Token"
-        alert.informativeText = "Paste the access token you were given.\nThis authenticates your app for transcription services.\n\nContact the app administrator if you don't have a token."
+        alert.messageText = "Sign In"
+        alert.informativeText = "Sign in with your Google account to enable automatic transcription.\n\nYour browser will open for Google sign-in."
         alert.alertStyle = .informational
 
-        let input = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 350, height: 24))
-        input.placeholderString = "Paste access token here"
-        alert.accessoryView = input
-        alert.window.initialFirstResponder = input
-
-        alert.addButton(withTitle: "Save Token")
+        alert.addButton(withTitle: "Sign in with Google")
         alert.addButton(withTitle: "Skip for Now")
 
         let response = alert.runModal()
 
         if response == .alertFirstButtonReturn {
-            let token = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            return token.isEmpty ? nil : token
+            GoogleAuth.signIn { tokens in
+                guard let tokens = tokens else {
+                    fputs("[onboarding] Google sign-in failed\n", stderr)
+                    DispatchQueue.main.async {
+                        let errorAlert = NSAlert()
+                        errorAlert.messageText = "Sign-In Failed"
+                        errorAlert.informativeText = "Could not complete Google sign-in. You can try again later from the menu bar."
+                        errorAlert.alertStyle = .warning
+                        errorAlert.addButton(withTitle: "Continue Without Sign-In")
+                        errorAlert.runModal()
+                    }
+                    completion(false)
+                    return
+                }
+
+                // Store refresh token in Keychain for silent re-auth
+                if let refreshToken = tokens.refreshToken {
+                    _ = KeychainHelper.save(key: KeychainHelper.googleRefreshToken, value: refreshToken)
+                }
+
+                fputs("[onboarding] Google sign-in successful\n", stderr)
+                completion(true)
+            }
+        } else {
+            completion(false)
         }
-        return nil
     }
 }

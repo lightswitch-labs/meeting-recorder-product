@@ -57,5 +57,5 @@ struct KeychainHelper {
     }
 
     // Well-known keys
-    static let accessToken = "MEETING_RECORDER_TOKEN"
+    static let googleRefreshToken = "GOOGLE_REFRESH_TOKEN"
 }

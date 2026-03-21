@@ -1,7 +1,7 @@
 import Foundation
 
 /// Handles post-recording actions: metadata sidecar + transcription pipeline invocation.
-/// Fetches API key from the key-vending service using the user's access token.
+/// Authenticates via Google OAuth → key-vending service → AssemblyAI API key.
 final class PipelineHandoff {
 
     private let keyVendingURL = "https://keys.lightswitchlabs.ai/api/key"
@@ -35,20 +35,40 @@ final class PipelineHandoff {
             return
         }
 
-        // Load access token from Keychain
-        guard let token = KeychainHelper.load(key: KeychainHelper.accessToken) else {
-            fputs("[handoff] No access token in Keychain — skipping transcription\n", stderr)
+        // Get a fresh ID token via Google refresh token
+        guard let refreshToken = KeychainHelper.load(key: KeychainHelper.googleRefreshToken) else {
+            fputs("[handoff] No Google refresh token — user needs to sign in\n", stderr)
             sendNotification(
                 title: "Transcription Skipped",
-                body: "No access token configured. Re-run setup or contact the app administrator."
+                body: "Not signed in. Open Meeting Recorder to sign in with Google."
+            )
+            return
+        }
+
+        fputs("[handoff] Refreshing Google token...\n", stderr)
+
+        let semaphore = DispatchSemaphore(value: 0)
+        var idToken: String?
+
+        GoogleAuth.refresh(refreshToken: refreshToken) { tokens in
+            idToken = tokens?.idToken
+            semaphore.signal()
+        }
+        semaphore.wait()
+
+        guard let token = idToken else {
+            fputs("[handoff] Failed to refresh Google token — user may need to re-sign-in\n", stderr)
+            sendNotification(
+                title: "Transcription Skipped",
+                body: "Google sign-in expired. Open Meeting Recorder to sign in again."
             )
             return
         }
 
         // Fetch API key from key-vending service
         fputs("[handoff] Fetching API key from key-vending service...\n", stderr)
-        guard let apiKey = fetchAPIKey(token: token) else {
-            return  // error already logged and notified in fetchAPIKey
+        guard let apiKey = fetchAPIKey(idToken: token) else {
+            return  // error already logged and notified
         }
 
         // Locate bundled call-analyzer.py
@@ -80,18 +100,16 @@ final class PipelineHandoff {
 
         process.arguments = arguments
 
-        // Pass API key via environment (not CLI arg — more secure)
+        // Pass API key via environment
         var env = ProcessInfo.processInfo.environment
         env["ASSEMBLYAI_API_KEY"] = apiKey
         process.environment = env
 
-        // Capture stdout and stderr for debugging
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
 
-        // Run in background — don't block the recorder
         DispatchQueue.global().async {
             do {
                 try process.run()
@@ -114,12 +132,8 @@ final class PipelineHandoff {
                     )
                 } else {
                     fputs("[handoff] Transcription FAILED (exit code \(process.terminationStatus))\n", stderr)
-                    if !stdout.isEmpty {
-                        fputs("[handoff] stdout: \(stdout.prefix(1000))\n", stderr)
-                    }
-                    if !stderrOutput.isEmpty {
-                        fputs("[handoff] stderr: \(stderrOutput.prefix(1000))\n", stderr)
-                    }
+                    if !stdout.isEmpty { fputs("[handoff] stdout: \(stdout.prefix(1000))\n", stderr) }
+                    if !stderrOutput.isEmpty { fputs("[handoff] stderr: \(stderrOutput.prefix(1000))\n", stderr) }
                     self.sendNotification(
                         title: "Transcription Failed",
                         body: "\"\(result.meetingTitle)\" — exit code \(process.terminationStatus)"
@@ -135,20 +149,19 @@ final class PipelineHandoff {
         }
     }
 
-    /// Fetch the AssemblyAI API key from the key-vending service.
-    /// Returns nil on failure (logs and notifies the user).
-    private func fetchAPIKey(token: String) -> String? {
+    /// Fetch the AssemblyAI API key from the key-vending service using a Google ID token.
+    private func fetchAPIKey(idToken: String) -> String? {
         guard let url = URL(string: keyVendingURL) else { return nil }
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("Bearer \(idToken)", forHTTPHeaderField: "Authorization")
         request.timeoutInterval = 10
 
         var apiKey: String?
         let semaphore = DispatchSemaphore(value: 0)
 
-        let task = URLSession.shared.dataTask(with: request) { data, response, error in
+        URLSession.shared.dataTask(with: request) { data, response, error in
             defer { semaphore.signal() }
 
             if let error = error {
@@ -171,38 +184,35 @@ final class PipelineHandoff {
                    let key = json["key"] as? String, !key.isEmpty {
                     apiKey = key
                     fputs("[handoff] API key fetched successfully\n", stderr)
-                } else {
-                    fputs("[handoff] Key-vending: invalid response body\n", stderr)
                 }
             } else if httpResponse.statusCode == 401 {
-                fputs("[handoff] Key-vending: unauthorized — invalid token\n", stderr)
+                fputs("[handoff] Key-vending: unauthorized — token invalid or expired\n", stderr)
                 self.sendNotification(
                     title: "Transcription Skipped",
-                    body: "Your access token is invalid. Contact the app administrator."
+                    body: "Authentication failed. Try signing in again from the menu bar."
                 )
             } else if httpResponse.statusCode == 403 {
-                fputs("[handoff] Key-vending: token revoked\n", stderr)
+                fputs("[handoff] Key-vending: access not authorized for this account\n", stderr)
                 self.sendNotification(
-                    title: "Access Revoked",
-                    body: "Your access token has been revoked. Contact the app administrator."
+                    title: "Access Not Authorized",
+                    body: "Your Google account is not authorized to use this app. Contact the administrator."
                 )
             } else {
                 fputs("[handoff] Key-vending: unexpected status \(httpResponse.statusCode)\n", stderr)
+                if let body = String(data: data, encoding: .utf8) {
+                    fputs("[handoff] Response: \(body.prefix(500))\n", stderr)
+                }
             }
-        }
+        }.resume()
 
-        task.resume()
         semaphore.wait()
-
         return apiKey
     }
 
-    /// Path to the bundled call-analyzer.py inside the .app bundle
     private func bundledAnalyzerPath() -> String {
         if let bundlePath = Bundle.main.path(forResource: "call-analyzer", ofType: "py") {
             return bundlePath
         }
-        // Fallback: check next to the executable (for CLI mode / dev builds)
         let execDir = Bundle.main.executableURL?.deletingLastPathComponent().path ?? ""
         return (execDir as NSString).appendingPathComponent("call-analyzer.py")
     }
