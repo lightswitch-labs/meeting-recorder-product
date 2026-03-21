@@ -4,7 +4,7 @@ import Foundation
 /// Fetches API key from the key-vending service using the user's access token.
 final class PipelineHandoff {
 
-    private let keyVendingURL = "https://meeting-recorder-keys.zaro-michael.workers.dev/api/key"
+    private let keyVendingURL = "https://keys.lightswitchlabs.ai/api/key"
 
     /// Process a completed recording: write metadata and invoke transcription pipeline.
     func process(_ result: RecordingResult) {
