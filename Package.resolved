@@ -1,0 +1,14 @@
+{
+  "pins" : [
+    {
+      "identity" : "audiotee",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/makeusabrew/audiotee.git",
+      "state" : {
+        "branch" : "main",
+        "revision" : "1cd2e83060d091843b4c8063b412922336cfdae8"
+      }
+    }
+  ],
+  "version" : 2
+}

@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>Meeting Recorder</string>
+    <key>CFBundleDisplayName</key>
+    <string>Meeting Recorder</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.vschool.meeting-recorder</string>
+    <key>CFBundleVersion</key>
+    <string>1.0.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0.0</string>
+    <key>CFBundleExecutable</key>
+    <string>MeetingRecorder</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.2</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Meeting Recorder needs microphone access to capture your voice during meetings.</string>
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>Meeting Recorder needs system audio access to capture meeting participants.</string>
+    <key>NSCalendarsUsageDescription</key>
+    <string>Meeting Recorder reads your calendar to detect upcoming meetings and auto-start recording.</string>
+    <key>NSCalendarsFullAccessUsageDescription</key>
+    <string>Meeting Recorder reads your calendar to detect upcoming meetings and auto-start recording.</string>
+    <key>NSCameraUsageDescription</key>
+    <string>Meeting Recorder checks camera status to detect when you're in a video call.</string>
+</dict>
+</plist>
