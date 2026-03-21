@@ -57,5 +57,5 @@ struct KeychainHelper {
     }
 
     // Well-known keys
-    static let assemblyAIKey = "ASSEMBLYAI_API_KEY"
+    static let accessToken = "MEETING_RECORDER_TOKEN"
 }

@@ -4,7 +4,7 @@ import Foundation
 /// First-launch onboarding wizard. Collects:
 /// 1. Where to save recordings (WAV files)
 /// 2. Where to save transcripts/summaries (markdown files)
-/// 3. AssemblyAI API key (stored in Keychain)
+/// 3. Access token for the key-vending service (stored in Keychain)
 final class OnboardingWizard {
 
     enum Result {
@@ -36,8 +36,8 @@ final class OnboardingWizard {
                 return
             }
 
-            // Step 3: AssemblyAI API key
-            let apiKey = promptForAPIKey()
+            // Step 3: Access token
+            let token = promptForToken()
 
             // Build config
             let recordingsPath = (recordingsDir as NSString).appendingPathComponent("recordings")
@@ -47,13 +47,13 @@ final class OnboardingWizard {
             try? FileManager.default.createDirectory(atPath: recordingsPath, withIntermediateDirectories: true)
             try? FileManager.default.createDirectory(atPath: transcriptsPath, withIntermediateDirectories: true)
 
-            // Save API key to Keychain
-            if let key = apiKey, !key.isEmpty {
-                let saved = KeychainHelper.save(key: KeychainHelper.assemblyAIKey, value: key)
+            // Save token to Keychain
+            if let token = token, !token.isEmpty {
+                let saved = KeychainHelper.save(key: KeychainHelper.accessToken, value: token)
                 if saved {
-                    fputs("[onboarding] AssemblyAI API key saved to Keychain\n", stderr)
+                    fputs("[onboarding] Access token saved to Keychain\n", stderr)
                 } else {
-                    fputs("[onboarding] WARNING: Failed to save API key to Keychain\n", stderr)
+                    fputs("[onboarding] WARNING: Failed to save access token to Keychain\n", stderr)
                 }
             }
 
@@ -76,7 +76,7 @@ final class OnboardingWizard {
         alert.informativeText = "\(message)\n\nCurrent selection: \(defaultPath)"
         alert.alertStyle = .informational
         alert.addButton(withTitle: "Use Default")
-        alert.addButton(withTitle: "Choose Folder…")
+        alert.addButton(withTitle: "Choose Folder\u{2026}")
         alert.addButton(withTitle: "Cancel")
 
         let response = alert.runModal()
@@ -102,25 +102,25 @@ final class OnboardingWizard {
         }
     }
 
-    private static func promptForAPIKey() -> String? {
+    private static func promptForToken() -> String? {
         let alert = NSAlert()
-        alert.messageText = "AssemblyAI API Key"
-        alert.informativeText = "Paste your AssemblyAI API key for speech-to-text transcription.\nThis will be stored securely in your macOS Keychain.\n\nYou can skip this and add it later in Settings."
+        alert.messageText = "Access Token"
+        alert.informativeText = "Paste the access token you were given.\nThis authenticates your app for transcription services.\n\nContact the app administrator if you don't have a token."
         alert.alertStyle = .informational
 
         let input = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 350, height: 24))
-        input.placeholderString = "Paste API key here"
+        input.placeholderString = "Paste access token here"
         alert.accessoryView = input
         alert.window.initialFirstResponder = input
 
-        alert.addButton(withTitle: "Save Key")
+        alert.addButton(withTitle: "Save Token")
         alert.addButton(withTitle: "Skip for Now")
 
         let response = alert.runModal()
 
         if response == .alertFirstButtonReturn {
-            let key = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            return key.isEmpty ? nil : key
+            let token = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            return token.isEmpty ? nil : token
         }
         return nil
     }

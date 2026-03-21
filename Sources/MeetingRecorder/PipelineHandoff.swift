@@ -1,8 +1,10 @@
 import Foundation
 
 /// Handles post-recording actions: metadata sidecar + transcription pipeline invocation.
-/// Uses bundled call-analyzer.py, Keychain for API key, and AppConfig for output paths.
+/// Fetches API key from the key-vending service using the user's access token.
 final class PipelineHandoff {
+
+    private let keyVendingURL = "https://meeting-recorder-keys.zaro-michael.workers.dev/api/key"
 
     /// Process a completed recording: write metadata and invoke transcription pipeline.
     func process(_ result: RecordingResult) {
@@ -33,14 +35,20 @@ final class PipelineHandoff {
             return
         }
 
-        // Load API key from Keychain
-        guard let apiKey = KeychainHelper.load(key: KeychainHelper.assemblyAIKey) else {
-            fputs("[handoff] No AssemblyAI API key in Keychain — skipping transcription\n", stderr)
+        // Load access token from Keychain
+        guard let token = KeychainHelper.load(key: KeychainHelper.accessToken) else {
+            fputs("[handoff] No access token in Keychain — skipping transcription\n", stderr)
             sendNotification(
                 title: "Transcription Skipped",
-                body: "No AssemblyAI API key configured. Add it in Settings."
+                body: "No access token configured. Re-run setup or contact the app administrator."
             )
             return
+        }
+
+        // Fetch API key from key-vending service
+        fputs("[handoff] Fetching API key from key-vending service...\n", stderr)
+        guard let apiKey = fetchAPIKey(token: token) else {
+            return  // error already logged and notified in fetchAPIKey
         }
 
         // Locate bundled call-analyzer.py
@@ -125,6 +133,68 @@ final class PipelineHandoff {
                 )
             }
         }
+    }
+
+    /// Fetch the AssemblyAI API key from the key-vending service.
+    /// Returns nil on failure (logs and notifies the user).
+    private func fetchAPIKey(token: String) -> String? {
+        guard let url = URL(string: keyVendingURL) else { return nil }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = 10
+
+        var apiKey: String?
+        let semaphore = DispatchSemaphore(value: 0)
+
+        let task = URLSession.shared.dataTask(with: request) { data, response, error in
+            defer { semaphore.signal() }
+
+            if let error = error {
+                fputs("[handoff] Key-vending request failed: \(error.localizedDescription)\n", stderr)
+                self.sendNotification(
+                    title: "Transcription Skipped",
+                    body: "Could not reach the key service. Check your internet connection."
+                )
+                return
+            }
+
+            guard let httpResponse = response as? HTTPURLResponse,
+                  let data = data else {
+                fputs("[handoff] Key-vending: no response\n", stderr)
+                return
+            }
+
+            if httpResponse.statusCode == 200 {
+                if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let key = json["key"] as? String, !key.isEmpty {
+                    apiKey = key
+                    fputs("[handoff] API key fetched successfully\n", stderr)
+                } else {
+                    fputs("[handoff] Key-vending: invalid response body\n", stderr)
+                }
+            } else if httpResponse.statusCode == 401 {
+                fputs("[handoff] Key-vending: unauthorized — invalid token\n", stderr)
+                self.sendNotification(
+                    title: "Transcription Skipped",
+                    body: "Your access token is invalid. Contact the app administrator."
+                )
+            } else if httpResponse.statusCode == 403 {
+                fputs("[handoff] Key-vending: token revoked\n", stderr)
+                self.sendNotification(
+                    title: "Access Revoked",
+                    body: "Your access token has been revoked. Contact the app administrator."
+                )
+            } else {
+                fputs("[handoff] Key-vending: unexpected status \(httpResponse.statusCode)\n", stderr)
+            }
+        }
+
+        task.resume()
+        semaphore.wait()
+
+        return apiKey
     }
 
     /// Path to the bundled call-analyzer.py inside the .app bundle
