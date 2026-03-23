@@ -5,8 +5,7 @@ import Foundation
 /// Uses a local HTTP server to catch the redirect, then exchanges the code for tokens.
 final class GoogleAuth {
     private static let clientID = "983588554931-57jkfl300odr61n573o2ko20dobujldt.apps.googleusercontent.com"
-    private static let clientSecret = "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"
-    private static let tokenEndpoint = "https://oauth2.googleapis.com/token"
+    private static let workerBase = "https://keys.lightswitchlabs.ai"
     private static let authEndpoint = "https://accounts.google.com/o/oauth2/v2/auth"
 
     struct Tokens {
@@ -59,18 +58,12 @@ final class GoogleAuth {
 
     /// Use a refresh token to get a new ID token without user interaction.
     static func refresh(refreshToken: String, completion: @escaping (Tokens?) -> Void) {
-        var request = URLRequest(url: URL(string: tokenEndpoint)!)
+        var request = URLRequest(url: URL(string: "\(workerBase)/api/auth/refresh")!)
         request.httpMethod = "POST"
-        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
-        let body = [
-            "client_id=\(clientID)",
-            "client_secret=\(clientSecret)",
-            "refresh_token=\(refreshToken)",
-            "grant_type=refresh_token",
-        ].joined(separator: "&")
-
-        request.httpBody = body.data(using: .utf8)
+        let bodyDict: [String: String] = ["refresh_token": refreshToken]
+        request.httpBody = try? JSONSerialization.data(withJSONObject: bodyDict)
 
         URLSession.shared.dataTask(with: request) { data, _, error in
             guard let data = data, error == nil,
@@ -87,27 +80,20 @@ final class GoogleAuth {
     }
 
     private static func exchangeCode(_ code: String, redirectURI: String, completion: @escaping (Tokens?) -> Void) {
-        var request = URLRequest(url: URL(string: tokenEndpoint)!)
+        var request = URLRequest(url: URL(string: "\(workerBase)/api/auth/exchange")!)
         request.httpMethod = "POST"
-        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
-        let body = [
-            "code=\(code)",
-            "client_id=\(clientID)",
-            "client_secret=\(clientSecret)",
-            "redirect_uri=\(redirectURI)",
-            "grant_type=authorization_code",
-        ].joined(separator: "&")
-
-        request.httpBody = body.data(using: .utf8)
+        let bodyDict: [String: String] = ["code": code, "redirect_uri": redirectURI]
+        request.httpBody = try? JSONSerialization.data(withJSONObject: bodyDict)
 
         URLSession.shared.dataTask(with: request) { data, _, error in
             guard let data = data, error == nil,
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let idToken = json["id_token"] as? String else {
                 fputs("[google-auth] Code exchange failed: \(error?.localizedDescription ?? "unknown")\n", stderr)
-                if let data = data, let body = String(data: data, encoding: .utf8) {
-                    fputs("[google-auth] Response: \(body.prefix(500))\n", stderr)
+                if let data = data, let respBody = String(data: data, encoding: .utf8) {
+                    fputs("[google-auth] Response: \(respBody.prefix(500))\n", stderr)
                 }
                 completion(nil)
                 return
