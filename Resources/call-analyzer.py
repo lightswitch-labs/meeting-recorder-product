@@ -4,11 +4,15 @@ Call Intelligence Pipeline — Meeting Recorder Product
 Transcribes recordings via AssemblyAI and produces structured meeting
 briefs via Claude CLI.
 
+All output goes to stdout as JSON. All progress/status goes to stderr.
+The calling Swift app handles file writing and notifications.
+
 Usage:
-    python3 call-analyzer.py <audio_path> --entity <entity> --output-dir <dir> [--meeting-name "Name"] [--date YYYY-MM-DD] [--attendees "Alice,Bob"] [--dry-run]
+    python3 call-analyzer.py <audio_path> --entity <entity> [--meeting-name "Name"] [--date YYYY-MM-DD] [--attendees "Alice,Bob"]
 """
 
 import argparse
+import json
 import os
 import re
 import subprocess
@@ -18,18 +22,12 @@ from pathlib import Path
 from typing import Optional
 
 
-# ── Helpers ────────────────────────────────────────────────────────────
-
-def notify(title: str, message: str):
-    """Send a macOS notification."""
-    subprocess.run([
-        "osascript", "-e",
-        f'display notification "{message}" with title "{title}"'
-    ], capture_output=True)
+def log(msg: str):
+    """Print to stderr so stdout stays clean for JSON output."""
+    print(msg, file=sys.stderr)
 
 
 def slugify(text: str) -> str:
-    """Convert text to a URL-friendly slug."""
     text = text.lower().strip()
     text = re.sub(r"[^\w\s-]", "", text)
     text = re.sub(r"[\s_]+", "-", text)
@@ -38,7 +36,6 @@ def slugify(text: str) -> str:
 
 
 def detect_date_from_filename(filename: str) -> Optional[str]:
-    """Try to extract a YYYY-MM-DD date from the filename."""
     m = re.search(r"(20\d{2})[_-](\d{2})[_-](\d{2})", filename)
     if m:
         return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
@@ -46,11 +43,8 @@ def detect_date_from_filename(filename: str) -> Optional[str]:
 
 
 def generate_meeting_name(filename: str, date_str: str) -> str:
-    """Generate a human-readable meeting name from the filename."""
     name = Path(filename).stem
-    # Remove date patterns
     name = re.sub(r"20\d{2}[_-]\d{2}[_-]\d{2}[_-]?\d*[_-]?\d*[_-]?\d*", "", name)
-    # Clean up
     name = name.replace("_", " ").replace("-", " ").strip()
     name = re.sub(r"\s+", " ", name)
     if name:
@@ -61,18 +55,17 @@ def generate_meeting_name(filename: str, date_str: str) -> str:
 # ── Pipeline Steps ─────────────────────────────────────────────────────
 
 def transcribe(audio_path: str) -> dict:
-    """Upload and transcribe audio via AssemblyAI. Returns transcript data."""
     import assemblyai as aai
 
     api_key = os.environ.get("ASSEMBLYAI_API_KEY")
     if not api_key:
-        print("ERROR: ASSEMBLYAI_API_KEY not set in environment")
+        log("ERROR: ASSEMBLYAI_API_KEY not set in environment")
         sys.exit(1)
 
     aai.settings.api_key = api_key
 
-    print(f"  Uploading and transcribing: {os.path.basename(audio_path)}")
-    print("  This may take several minutes for long recordings...")
+    log(f"  Uploading and transcribing: {os.path.basename(audio_path)}")
+    log("  This may take several minutes for long recordings...")
 
     config = aai.TranscriptionConfig(
         speaker_labels=True,
@@ -84,10 +77,9 @@ def transcribe(audio_path: str) -> dict:
     transcript = transcriber.transcribe(audio_path, config=config)
 
     if transcript.status == aai.TranscriptStatus.error:
-        print(f"ERROR: AssemblyAI transcription failed: {transcript.error}")
+        log(f"ERROR: AssemblyAI transcription failed: {transcript.error}")
         sys.exit(1)
 
-    # Build speaker-labeled text
     speaker_text = ""
     for utterance in transcript.utterances:
         speaker_text += f"Speaker {utterance.speaker}: {utterance.text}\n\n"
@@ -95,7 +87,7 @@ def transcribe(audio_path: str) -> dict:
     duration_min = round(transcript.audio_duration / 60, 1)
     speakers = sorted(set(u.speaker for u in transcript.utterances))
 
-    print(f"  Transcription complete: {duration_min} min, {len(speakers)} speakers, {len(transcript.utterances)} utterances")
+    log(f"  Transcription complete: {duration_min} min, {len(speakers)} speakers, {len(transcript.utterances)} utterances")
 
     return {
         "speaker_text": speaker_text,
@@ -108,7 +100,6 @@ def transcribe(audio_path: str) -> dict:
 
 def _fallback_output(meeting_name: str, date_str: str, entity: str,
                      transcript_data: dict) -> str:
-    """Fallback output when Claude analysis fails — saves raw transcript."""
     return f"""# {meeting_name} — {date_str}
 
 **Source:** AssemblyAI (Claude analysis failed — raw transcript only)
@@ -123,7 +114,6 @@ def _fallback_output(meeting_name: str, date_str: str, entity: str,
 {transcript_data['speaker_text']}"""
 
 
-# Embedded analysis prompt — no external file dependency
 ANALYSIS_PROMPT = """You are analyzing a meeting transcript. Produce a structured summary following the format below. Be thorough — this summary will be used for follow-up planning and reference.
 
 ### Output Format
@@ -164,9 +154,6 @@ Final confirmed list of names, roles, and contact info if mentioned.
 
 def analyze(transcript_data: dict, meeting_name: str, entity: str,
             date_str: str, attendees: Optional[str]) -> str:
-    """Run Claude CLI to analyze the transcript. Returns the markdown analysis."""
-
-    # Build the full prompt with context
     context_lines = [
         f"**Meeting context:** {meeting_name}",
         f"**Entity:** {entity}",
@@ -202,9 +189,8 @@ IMPORTANT OUTPUT INSTRUCTIONS:
 
 {transcript_data['speaker_text']}"""
 
-    print("  Running Claude analysis...")
+    log("  Running Claude analysis...")
 
-    # Remove CLAUDECODE env var so claude -p works even when called from Claude Code
     env = os.environ.copy()
     env.pop("CLAUDECODE", None)
 
@@ -214,44 +200,22 @@ IMPORTANT OUTPUT INSTRUCTIONS:
             input=full_prompt,
             capture_output=True,
             text=True,
-            timeout=1800,  # 30 min — long transcripts need time
+            timeout=1800,
             env=env,
         )
     except subprocess.TimeoutExpired:
-        print("  ERROR: Claude CLI timed out after 30 minutes.")
-        print("  Saving raw transcript as fallback.")
+        log("  ERROR: Claude CLI timed out after 30 minutes.")
         return _fallback_output(meeting_name, date_str, entity, transcript_data)
 
     if result.returncode != 0:
-        print(f"WARNING: Claude CLI returned exit code {result.returncode}")
+        log(f"WARNING: Claude CLI returned exit code {result.returncode}")
         if result.stderr:
-            print(f"  stderr: {result.stderr[:500]}")
+            log(f"  stderr: {result.stderr[:500]}")
         if not result.stdout.strip():
-            print("  Claude produced no output. Saving raw transcript as fallback.")
+            log("  Claude produced no output. Using raw transcript as fallback.")
             return _fallback_output(meeting_name, date_str, entity, transcript_data)
 
     return result.stdout.strip()
-
-
-def write_output(analysis: str, output_dir: str, entity: str,
-                 date_str: str, slug: str, dry_run: bool) -> Path:
-    """Write the analysis markdown to the output directory."""
-    # Structure: output_dir/entity/meetings/date-slug.md
-    meetings_dir = Path(output_dir) / entity / "meetings"
-    meetings_dir.mkdir(parents=True, exist_ok=True)
-
-    filename = f"{date_str}-{slug}.md"
-    output_path = meetings_dir / filename
-
-    if output_path.exists():
-        print(f"  Overwriting existing file: {output_path}")
-    else:
-        print(f"  Writing new file: {output_path}")
-
-    if not dry_run:
-        output_path.write_text(analysis + "\n")
-
-    return output_path
 
 
 # ── Main ───────────────────────────────────────────────────────────────
@@ -262,69 +226,59 @@ def main():
     )
     parser.add_argument("file_path", help="Path to the audio recording")
     parser.add_argument("--entity", required=True, help="Entity (team/client) name")
-    parser.add_argument("--output-dir", required=True, help="Base directory for transcript output")
     parser.add_argument("--meeting-name", default=None,
                         help="Human-readable meeting name (auto-generated if omitted)")
     parser.add_argument("--date", default=None,
                         help="Meeting date YYYY-MM-DD (auto-detected from filename if omitted)")
     parser.add_argument("--attendees", default=None,
                         help="Comma-separated attendee names to help speaker identification")
-    parser.add_argument("--dry-run", action="store_true",
-                        help="Generate analysis but don't write files")
 
     args = parser.parse_args()
 
-    # Resolve and validate file path
     audio_path = os.path.expanduser(args.file_path)
     if not os.path.isfile(audio_path):
-        print(f"ERROR: File not found: {audio_path}")
+        log(f"ERROR: File not found: {audio_path}")
         sys.exit(1)
 
-    # Determine date
     date_str = args.date or detect_date_from_filename(os.path.basename(audio_path))
     if not date_str:
         date_str = datetime.now().strftime("%Y-%m-%d")
-        print(f"  No date detected — using today: {date_str}")
+        log(f"  No date detected — using today: {date_str}")
 
-    # Determine meeting name
     meeting_name = args.meeting_name or generate_meeting_name(
         os.path.basename(audio_path), date_str
     )
     slug = slugify(meeting_name)
 
-    print(f"\n{'='*60}")
-    print(f"  Meeting Recorder — Analysis Pipeline")
-    print(f"  Meeting:  {meeting_name}")
-    print(f"  Date:     {date_str}")
-    print(f"  Entity:   {args.entity}")
-    print(f"  Output:   {args.output_dir}")
-    print(f"  File:     {os.path.basename(audio_path)}")
+    log(f"\n{'='*60}")
+    log(f"  Meeting Recorder — Analysis Pipeline")
+    log(f"  Meeting:  {meeting_name}")
+    log(f"  Date:     {date_str}")
+    log(f"  Entity:   {args.entity}")
+    log(f"  File:     {os.path.basename(audio_path)}")
     if args.attendees:
-        print(f"  Attendees: {args.attendees}")
-    if args.dry_run:
-        print(f"  Mode:     DRY RUN")
-    print(f"{'='*60}\n")
+        log(f"  Attendees: {args.attendees}")
+    log(f"{'='*60}\n")
 
     # Step 1: Transcribe
-    print("[1/3] Transcribing via AssemblyAI...")
+    log("[1/2] Transcribing via AssemblyAI...")
     transcript_data = transcribe(audio_path)
 
     # Step 2: Analyze
-    print("\n[2/3] Analyzing via Claude...")
+    log("\n[2/2] Analyzing via Claude...")
     analysis = analyze(transcript_data, meeting_name, args.entity, date_str, args.attendees)
 
-    # Step 3: Write output
-    print("\n[3/3] Writing output...")
-    output_path = write_output(analysis, args.output_dir, args.entity, date_str, slug, args.dry_run)
+    # Output JSON to stdout — Swift app handles file writing
+    output = {
+        "meeting_name": meeting_name,
+        "date": date_str,
+        "slug": slug,
+        "entity": args.entity,
+        "analysis": analysis,
+    }
+    print(json.dumps(output))
 
-    # Notify
-    if not args.dry_run:
-        notify("Meeting Analysis Complete", f"{meeting_name} saved to {args.entity}/meetings/")
-
-    print(f"\n{'='*60}")
-    print(f"  Done! Analysis written to:")
-    print(f"  {output_path}")
-    print(f"{'='*60}\n")
+    log(f"\n  Done! Analysis ready for: {meeting_name}")
 
 
 if __name__ == "__main__":

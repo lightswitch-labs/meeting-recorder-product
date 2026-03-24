@@ -87,7 +87,6 @@ final class PipelineHandoff {
             analyzerPath,
             result.path,
             "--entity", result.entity,
-            "--output-dir", config.transcriptsDir,
         ]
 
         if !result.meetingTitle.isEmpty && result.meetingTitle != "Manual Recording" {
@@ -118,27 +117,56 @@ final class PipelineHandoff {
 
                 let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
                 let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
-                let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
                 let stderrOutput = String(data: stderrData, encoding: .utf8) ?? ""
 
-                if process.terminationStatus == 0 {
-                    fputs("[handoff] Transcription complete for: \(result.meetingTitle)\n", stderr)
-                    if !stdout.isEmpty {
-                        fputs("[handoff] Output: \(stdout.prefix(500))\n", stderr)
-                    }
-                    self.sendNotification(
-                        title: "Meeting Transcribed",
-                        body: "\"\(result.meetingTitle)\" (\(result.durationMinutes)min) — \(result.entity)"
-                    )
-                } else {
+                if !stderrOutput.isEmpty {
+                    fputs("[handoff] Pipeline log:\n\(stderrOutput.prefix(2000))\n", stderr)
+                }
+
+                guard process.terminationStatus == 0 else {
                     fputs("[handoff] Transcription FAILED (exit code \(process.terminationStatus))\n", stderr)
-                    if !stdout.isEmpty { fputs("[handoff] stdout: \(stdout.prefix(1000))\n", stderr) }
-                    if !stderrOutput.isEmpty { fputs("[handoff] stderr: \(stderrOutput.prefix(1000))\n", stderr) }
                     self.sendNotification(
                         title: "Transcription Failed",
                         body: "\"\(result.meetingTitle)\" — exit code \(process.terminationStatus)"
                     )
+                    return
                 }
+
+                // Parse JSON output from Python
+                guard let json = try? JSONSerialization.jsonObject(with: stdoutData) as? [String: Any],
+                      let analysis = json["analysis"] as? String,
+                      let dateStr = json["date"] as? String,
+                      let slug = json["slug"] as? String,
+                      let entity = json["entity"] as? String else {
+                    fputs("[handoff] Failed to parse pipeline JSON output\n", stderr)
+                    self.sendNotification(
+                        title: "Transcription Failed",
+                        body: "\"\(result.meetingTitle)\" — invalid pipeline output"
+                    )
+                    return
+                }
+
+                // Write the markdown file (Swift has file permissions, Python doesn't)
+                let meetingsDir = (config.transcriptsDir as NSString)
+                    .appendingPathComponent(entity)
+                    .appending("/meetings")
+                let filename = "\(dateStr)-\(slug).md"
+                let outputPath = (meetingsDir as NSString).appendingPathComponent(filename)
+
+                do {
+                    try FileManager.default.createDirectory(
+                        atPath: meetingsDir, withIntermediateDirectories: true
+                    )
+                    try (analysis + "\n").write(toFile: outputPath, atomically: true, encoding: .utf8)
+                    fputs("[handoff] Analysis written to: \(outputPath)\n", stderr)
+                } catch {
+                    fputs("[handoff] Failed to write analysis file: \(error)\n", stderr)
+                }
+
+                self.sendNotification(
+                    title: "Meeting Transcribed",
+                    body: "\"\(result.meetingTitle)\" (\(result.durationMinutes)min) — \(result.entity)"
+                )
             } catch {
                 fputs("[handoff] Failed to invoke pipeline: \(error)\n", stderr)
                 self.sendNotification(
