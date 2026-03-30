@@ -111,8 +111,11 @@ final class RecordingOrchestrator {
             return
         }
 
-        // Use calendar context if available, otherwise defaults
-        let calendarMeeting = pendingCalendarMeeting
+        // Use calendar context if available; if not, look up the calendar now
+        let calendarMeeting = pendingCalendarMeeting ?? calendarTrigger.currentMeeting()
+        if calendarMeeting != nil && pendingCalendarMeeting == nil {
+            fputs("[orchestrator] No pending calendar meeting — found match via on-demand lookup: \"\(calendarMeeting!.title)\"\n", stderr)
+        }
         let entity = calendarMeeting.map { EntityDetector.detect(from: $0) } ?? EntityDetector.defaultEntity
         let title = calendarMeeting?.title ?? "\(meeting.app.displayName) Meeting"
         let attendees = calendarMeeting?.attendees ?? []

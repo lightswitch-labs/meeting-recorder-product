@@ -145,6 +145,40 @@ final class CalendarTrigger {
         }
     }
 
+    /// Look up the current or imminent calendar event right now (synchronous).
+    /// Called by the orchestrator when CptHost detects a call but no pending calendar meeting exists.
+    func currentMeeting() -> CalendarMeeting? {
+        let now = Date()
+        let windowStart = now.addingTimeInterval(-600)  // started up to 10 min ago
+        let windowEnd = now.addingTimeInterval(300)      // starts within 5 min
+
+        let calendars = eventStore.calendars(for: .event)
+        let predicate = eventStore.predicateForEvents(withStart: windowStart, end: windowEnd, calendars: calendars)
+        let events = eventStore.events(matching: predicate)
+
+        for event in events {
+            let meetingURL = extractMeetingURL(from: event)
+            guard meetingURL != nil || isMeetingEvent(event) else { continue }
+
+            let startTime = event.startDate ?? now
+            let endTime = event.endDate ?? now.addingTimeInterval(3600)
+
+            guard now < endTime else { continue }
+
+            return CalendarMeeting(
+                eventID: event.calendarItemIdentifier,
+                title: event.title ?? "Untitled Meeting",
+                startTime: startTime,
+                endTime: endTime,
+                meetingURL: meetingURL,
+                calendarEmail: event.calendar.source?.title,
+                attendees: extractAttendees(from: event),
+                isBrowserBased: isBrowserMeeting(meetingURL)
+            )
+        }
+        return nil
+    }
+
     private func extractMeetingURL(from event: EKEvent) -> String? {
         // Check URL field
         if let url = event.url?.absoluteString,
