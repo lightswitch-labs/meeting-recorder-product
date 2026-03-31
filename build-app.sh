@@ -15,8 +15,16 @@ mkdir -p MeetingRecorder.app/Contents/Resources
 cp Resources/call-analyzer.py MeetingRecorder.app/Contents/Resources/call-analyzer.py
 
 echo "Code signing..."
-codesign --force --deep --sign "$SIGNING_IDENTITY" \
+# Sign the main binary with entitlements first, then the bundle
+codesign --force --sign "$SIGNING_IDENTITY" \
     --options runtime \
+    --entitlements MeetingRecorder.entitlements \
+    --timestamp \
+    MeetingRecorder.app/Contents/MacOS/MeetingRecorder 2>&1
+
+codesign --force --sign "$SIGNING_IDENTITY" \
+    --options runtime \
+    --entitlements MeetingRecorder.entitlements \
     --timestamp \
     MeetingRecorder.app 2>&1
 
@@ -28,4 +36,4 @@ echo ""
 echo "Done! App bundle at: $(pwd)/MeetingRecorder.app"
 echo ""
 echo "To launch:  open MeetingRecorder.app"
-echo "To install: cp -r MeetingRecorder.app /Applications/"
+echo "To install: ditto MeetingRecorder.app /Applications/MeetingRecorder.app"
